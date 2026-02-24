@@ -214,21 +214,25 @@ const WAZIPER = {
     // -----------------------------------------------------------------------
     instance: async function(access_token, instance_id, res, callback) {
         if (instance_id === undefined && res != null) {
+            console.log(`[instance] ERRO: instance_id ausente`);
             return res.json({ status: 'error', message: "The Instance ID must be provided for the process to be completed" });
         }
 
         const team = await Common.db_get("sp_team", [{ ids: access_token }]);
         if (!team) {
+            console.log(`[instance] ERRO: team não encontrado para access_token=${access_token ? access_token.slice(0,8)+'...' : 'AUSENTE'}`);
             if (res) return res.json({ status: 'error', message: "The authentication process has failed" });
             return callback(false);
         }
 
         const session = await Common.db_get("sp_whatsapp_sessions", [{ instance_id }, { team_id: team.id }]);
         if (!session) {
+            console.log(`[instance] ERRO: sessão não encontrada — instance_id=${instance_id} team_id=${team.id}`);
             if (res) return res.json({ status: 'error', message: "The Instance ID provided has been invalidated" });
             return callback(false);
         }
 
+        console.log(`[instance] OK — instance_id=${instance_id} team_id=${team.id}`);
         // Garante usuário e conexão no fzap
         await ensureFzapUser(instance_id);
         return callback({ instance_id, team_id: team.id });

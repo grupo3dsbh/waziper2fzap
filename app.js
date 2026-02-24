@@ -38,8 +38,10 @@ WAZIPER.app.post('/connect_phone', WAZIPER.cors, async (req, res) => {
     var access_token = req.query.access_token;
     var instance_id  = req.query.instance_id;
     var phone_number = (req.body.phone_number || req.body.phone || '').replace(/\D/g, '');
+    console.log(`[route/connect_phone] recebido — instance_id=${instance_id} phone=${phone_number} token=${access_token ? access_token.slice(0,8)+'...' : 'AUSENTE'}`);
     if (!phone_number) return res.json({ status: 'error', message: 'phone_number is required' });
     await WAZIPER.instance(access_token, instance_id, res, async (client) => {
+        console.log(`[route/connect_phone] instance OK — chamando connect_phone`);
         await WAZIPER.connect_phone(instance_id, phone_number, res);
     });
 });
