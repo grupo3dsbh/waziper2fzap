@@ -857,8 +857,17 @@ const WAZIPER = {
     // -----------------------------------------------------------------------
     chatbot: async function(instance_id, user_type, message) {
         const chat_id = message.key?.remoteJid || '';
+        console.log(CYAN + `[chatbot] ${instance_id} — chat_id=${chat_id} user_type=${user_type}` + RESET);
+        console.log(CYAN + `[chatbot] message keys: ${Object.keys(message).join(', ')}` + RESET);
+        console.log(CYAN + `[chatbot] message.key=${JSON.stringify(message.key)}` + RESET);
+        console.log(CYAN + `[chatbot] message.message=${JSON.stringify(message.message)}` + RESET);
+        console.log(CYAN + `[chatbot] message.pushName=${message.pushName}` + RESET);
         const items   = await Common.db_fetch("sp_whatsapp_chatbot", [{ instance_id }, { status: 1 }, { run: 1 }]);
-        if (!items) return false;
+        if (!items) {
+            console.log(YELLOW + `[chatbot] ${instance_id} — nenhum item no DB (status=1, run=1)` + RESET);
+            return false;
+        }
+        console.log(CYAN + `[chatbot] ${instance_id} — ${items.length} item(s) encontrado(s) no DB` + RESET);
 
         const cleanedWaName = (message.pushName || '').replace(/[&<>"']/g, '');
         const userPhone     = chat_id.split('@')[0];
@@ -872,6 +881,7 @@ const WAZIPER = {
         } catch(e) {}
 
         const content = msgConversa.toLowerCase();
+        console.log(CYAN + `[chatbot] ${instance_id} — msgConversa="${msgConversa}" content="${content}"` + RESET);
         let sent = false;
 
         for (const item of items) {
@@ -1279,6 +1289,8 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
     // Processa mensagens recebidas (chatbot + autoresponder)
     if (event === 'Message') {
         const message = data;
+        console.log(CYAN + `[webhook/Message] ${instance_id} — data keys: ${Object.keys(data).join(', ')}` + RESET);
+        console.log(CYAN + `[webhook/Message] ${instance_id} — data.key=${JSON.stringify(data.key)} data.message=${JSON.stringify(data.message)}` + RESET);
 
         // Ignora mensagens enviadas por nós mesmos e status broadcast
         if (message.key?.fromMe === true) {
