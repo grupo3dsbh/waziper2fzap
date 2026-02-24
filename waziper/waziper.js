@@ -262,7 +262,7 @@ const WAZIPER = {
                         const ui = await fzapCall('POST', '/user/info', instance_id, { phone: [jidFull] });
                         if (ui.success && ui.data?.users?.[jidFull]) {
                             const u = ui.data.users[jidFull];
-                            pushName = u.pushName || u.fullName || '';
+                            pushName = u.pushName || u.fullName || u.businessName || '';
                         }
                     }
                 } catch (e) { /* opcional */ }
@@ -1349,7 +1349,7 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
                         console.log(CYAN + `[webhook] user/info: ${JSON.stringify(ui?.data?.users)}` + RESET);
                         if (ui.success && ui.data?.users?.[jidFull]) {
                             const u = ui.data.users[jidFull];
-                            pushName = u.pushName || u.fullName || '';
+                            pushName = u.pushName || u.fullName || u.businessName || '';
                         }
                     }
                 } catch (e) {
