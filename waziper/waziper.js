@@ -1,18 +1,17 @@
-'use strict';
+import http from 'http';
+import express from 'express';
+import moment from 'moment-timezone';
+import bodyParser from 'body-parser';
+import cors from 'cors';
+import spintax from 'spintax';
+import axios from 'axios';
+import { Server } from 'socket.io';
+import config from './../config.js';
+import Common from './common.js';
+import cron from 'node-cron';
 
-const http = require('http');
-const express = require('express');
-const moment = require('moment-timezone');
-const bodyParser = require('body-parser');
-const cors = require('cors');
-const spintax = require('spintax');
-const axios = require('axios');
 const app = express();
 const server = http.createServer(app);
-const { Server } = require("socket.io");
-const config = require("./../config.js");
-const Common = require("./common.js");
-const cron = require('node-cron');
 
 const bulks = {};
 const chatbots = {};
@@ -1237,7 +1236,7 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
     }
 });
 
-module.exports = WAZIPER;
+export default WAZIPER;
 
 // ---------------------------------------------------------------------------
 // Timers de manutenção
