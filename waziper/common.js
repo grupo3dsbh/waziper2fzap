@@ -200,6 +200,7 @@ const Common = {
 				avatar: wa_info.avatar,
 				tmp: JSON.stringify(wa_info),
 				status: 1,
+				can_post: 1,
 				changed: Common.time(),
 			},{
 				id: account_id
