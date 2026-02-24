@@ -23,7 +23,7 @@ const config = {
         // URL do servidor waziper (para configurar o webhook no fzap)
         // O fzap irá chamar esta URL quando receber mensagens do WhatsApp
         // Exemplo: "https://seu-dominio.com" ou "http://ip-do-servidor:8754"
-        webhook_base_url: "http://localhost:8754"
+        webhook_base_url: "https://api.seuatendimento.dev.br"
     }
 };
 
