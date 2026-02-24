@@ -225,22 +225,43 @@ const WAZIPER = {
     // -----------------------------------------------------------------------
     get_qrcode: async function(instance_id, res) {
         try {
-            // Verifica se já está conectado (fzap usa Connected com C maiúsculo)
             const status = await fzapCall('GET', '/session/status', instance_id);
-            const isConnected = status.success && status.data && (status.data.Connected || status.data.connected);
-            if (isConnected) {
+            // Sessão completamente autenticada (connected=true E loggedIn=true)
+            const isFullyConnected = status.success && status.data?.connected && status.data?.loggedIn;
+
+            if (isFullyConnected) {
+                // O PHP oauth() reseta status=0 ao abrir a tela de QR.
+                // Precisamos rativar a row em sp_whatsapp_sessions para que
+                // check_login() devolva sucesso e a página redirecione.
+                const jid   = status.data.jid || '';
+                const phone = jid ? Common.get_phone(jid) : '';
+                let avatarUrl = '';
+                try {
+                    if (phone) {
+                        const av = await fzapCall('POST', '/user/avatar', instance_id, { phone, preview: false });
+                        if (av.success && av.data?.url) avatarUrl = av.data.url;
+                    }
+                } catch (e) { /* avatar opcional */ }
+
+                const wa_info = { id: jid || instance_id, name: status.data.name || instance_id, avatar: avatarUrl };
+                await Common.update_status_instance(instance_id, wa_info);
                 return res.json({ status: 'success', message: 'Instance already connected', connected: true });
             }
-            // Inicia conexão para gerar o QR
-            await fzapCall('POST', '/session/connect', instance_id, {
-                subscribe: ['Message', 'ReadReceipt', 'ChatPresence', 'Presence'],
-                immediate: true
-            }).catch(() => {});
-            // Aguarda o fzap gerar o QR code
-            await new Promise(r => setTimeout(r, 3000));
-            const data = await fzapCall('GET', '/session/qr', instance_id);
-            if (data.success && data.data && data.data.qrCode) {
-                return res.json({ status: 'success', message: 'Success', base64: data.data.qrCode });
+
+            // Sessão com socket aberto mas aguardando QR (connected=true, loggedIn=false):
+            // NÃO chamar /session/connect de novo — apenas buscar QR atual
+            if (!status.data?.connected) {
+                // Socket completamente inativo — precisa iniciar conexão
+                await fzapCall('POST', '/session/connect', instance_id, {
+                    subscribe: ['Message', 'ReadReceipt', 'ChatPresence', 'Presence'],
+                    immediate: true
+                }).catch(() => {});
+                await new Promise(r => setTimeout(r, 3000));
+            }
+
+            const qrData = await fzapCall('GET', '/session/qr', instance_id);
+            if (qrData.success && qrData.data?.qrCode) {
+                return res.json({ status: 'success', message: 'Success', base64: qrData.data.qrCode });
             }
             return res.json({ status: 'error', message: "The system cannot generate a WhatsApp QR code" });
         } catch (err) {
@@ -1219,9 +1240,6 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
     // Atualiza status da conta quando WhatsApp conecta com sucesso
     if (event === 'Connected' || event === 'PairSuccess') {
         try {
-            // data = payload do webhook (pode conter jid/pushName diretamente)
-            console.log(YELLOW + `[webhook] Connected payload: ${JSON.stringify(data)}` + RESET);
-
             const statusData = await fzapCall('GET', '/session/status', instance_id);
             const [session, account] = await Promise.all([
                 Common.db_get("sp_whatsapp_sessions", [{ instance_id }]),
@@ -1229,39 +1247,48 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
             ]);
             const team_id = session?.team_id || account?.team_id;
             if (team_id) {
-                // Prefere usar dados do payload do webhook; fallback para /session/status
-                const jid      = data.jid  || data.Jid  || statusData?.data?.jid  || '';
-                const pushName = data.pushName || data.name || data.PushName ||
-                                 statusData?.data?.pushName || statusData?.data?.name || statusData?.data?.PushName || '';
+                const jid     = statusData?.data?.jid || '';
+                const jidFull = jid ? Common.get_phone(jid, 'wid') : ''; // ex: 553...@s.whatsapp.net
+                const phone   = jid ? Common.get_phone(jid)         : ''; // ex: 553...
 
-                // Busca avatar: tenta JID completo (553...@s.whatsapp.net) e depois só número
+                // Busca nome real via POST /user/info (status.data.name é o nome do token, não WhatsApp)
+                let pushName = '';
+                try {
+                    if (jidFull) {
+                        const ui = await fzapCall('POST', '/user/info', instance_id, { phone: [jidFull] });
+                        if (ui.success && ui.data?.users?.[jidFull]) {
+                            const u = ui.data.users[jidFull];
+                            pushName = u.pushName || u.fullName || '';
+                        }
+                    }
+                } catch (e) { /* opcional */ }
+
+                // Busca avatar via POST /user/avatar
                 let avatarUrl = '';
                 try {
-                    const jidFull = jid ? Common.get_phone(jid, 'wid') : ''; // ex: 553...@s.whatsapp.net
-                    const jidNum  = jid ? Common.get_phone(jid)         : ''; // ex: 553...
-                    for (const phone of [jidFull, jidNum]) {
-                        if (!phone) continue;
-                        const avatarData = await fzapCall('GET', `/user/avatar?phone=${encodeURIComponent(phone)}`, instance_id);
-                        if (avatarData.success && avatarData.data?.url) { avatarUrl = avatarData.data.url; break; }
+                    if (phone) {
+                        const av = await fzapCall('POST', '/user/avatar', instance_id, { phone, preview: false });
+                        if (av.success && av.data?.url) avatarUrl = av.data.url;
                     }
-                } catch (e) { /* avatar opcional */ }
+                } catch (e) { /* opcional */ }
 
                 const wa_info = {
                     id:     jid || instance_id,
                     name:   pushName || instance_id,
                     avatar: avatarUrl
                 };
+                console.log(GREEN + `[webhook] ${instance_id} conectado como: ${wa_info.name}` + RESET);
+
                 // Atualiza sp_accounts com status=1, can_post=1
                 await Common.db_update("sp_accounts", [
                     { status: 1, can_post: 1, name: wa_info.name, avatar: avatarUrl },
                     { token: instance_id }
                 ]);
-                // Ativa sp_whatsapp_sessions (UPDATE na row criada pelo PHP — não INSERT)
+                // Ativa sp_whatsapp_sessions (UPDATE na row criada pelo PHP)
                 await Common.update_status_instance(instance_id, wa_info);
                 await WAZIPER.add_account(instance_id, team_id, wa_info, account);
                 // Notifica frontend via Socket.IO
                 io.emit(instance_id, { connected: true, name: wa_info.name, avatar: wa_info.avatar });
-                console.log(GREEN + `[webhook] ${instance_id} conectado como: ${wa_info.name || instance_id}` + RESET);
             }
         } catch (err) {
             console.error(YELLOW + `[webhook] Erro ao processar Connected: ${err.message}` + RESET);
