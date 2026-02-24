@@ -307,26 +307,36 @@ const WAZIPER = {
     // -----------------------------------------------------------------------
     connect_phone: async function(instance_id, phone_number, res) {
         try {
-            // Garante que a sessão tem uma conexão ativa antes de pedir pair code
             const status = await fzapCall('GET', '/session/status', instance_id);
-            if (!status.data?.connected) {
-                await fzapCall('POST', '/session/connect', instance_id, {
-                    subscribe: ['Message', 'ReadReceipt', 'ChatPresence', 'Presence'],
-                    immediate: true
-                }).catch(() => {});
-                await new Promise(r => setTimeout(r, 3000));
-            } else if (status.data?.loggedIn) {
+            console.log(CYAN + `[connect_phone] ${instance_id} status: connected=${status.data?.connected} loggedIn=${status.data?.loggedIn}` + RESET);
+
+            if (status.data?.loggedIn) {
                 return res.json({ status: 'error', message: 'Already paired' });
             }
 
-            // Solicita o pair code para o número informado
+            if (!status.data?.connected) {
+                console.log(CYAN + `[connect_phone] ${instance_id}: iniciando conexão (immediate:true)` + RESET);
+                const conn = await fzapCall('POST', '/session/connect', instance_id, {
+                    subscribe: ['Message', 'ReadReceipt', 'ChatPresence', 'Presence'],
+                    immediate: true
+                }).catch(err => {
+                    console.warn(YELLOW + `[connect_phone] ${instance_id}: connect error: ${err.message}` + RESET);
+                    return null;
+                });
+                console.log(CYAN + `[connect_phone] ${instance_id}: connect result: ${JSON.stringify(conn?.data)}` + RESET);
+            }
+
+            console.log(CYAN + `[connect_phone] ${instance_id}: chamando pairphone phone=${phone_number}` + RESET);
             const result = await fzapCall('POST', '/session/pairphone', instance_id, { phone: phone_number });
+            console.log(CYAN + `[connect_phone] ${instance_id}: pairphone result: ${JSON.stringify(result)}` + RESET);
+
             if (result.success && result.data?.linkingCode) {
                 return res.json({ status: 'success', message: 'Success', code: result.data.linkingCode });
             }
             const errMsg = result.error || 'Could not generate pair code';
             return res.json({ status: 'error', message: errMsg });
         } catch (err) {
+            console.error(RED + `[connect_phone] ${instance_id}: exception: ${JSON.stringify(err.response?.data ?? err.message)}` + RESET);
             const msg = err.response?.data?.error || err.message;
             return res.json({ status: 'error', message: msg });
         }
