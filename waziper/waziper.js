@@ -1275,7 +1275,7 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
 
     const data  = payload.data || {};
 
-    console.log(BLUE + `[webhook] ${instance_id} ← evento: ${event}` + RESET);
+    console.log(BLUE + `[webhook] ${instance_id} ← evento: ${event} | keys: ${Object.keys(data).join(',')}` + RESET);
 
     // Repassa evento para webhook configurado no wapizer
     WAZIPER.webhook(instance_id, { event, data });
