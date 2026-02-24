@@ -148,6 +148,21 @@ const Common = {
 	    });
 		return res;
 	},
+	upsert_session: async function(instance_id, team_id, info){
+		return await new Promise((resolve) => {
+			const data = {
+				instance_id: instance_id,
+				team_id: team_id,
+				status: 1,
+				data: JSON.stringify(info)
+			};
+			db_connect.query(
+				'INSERT INTO sp_whatsapp_sessions SET ? ON DUPLICATE KEY UPDATE status=1, data=VALUES(data)',
+				data,
+				(err, res) => resolve(res)
+			);
+		});
+	},
 	db_insert_account: async function(instance_id, team_id, wa_info){
 		var res = await new Promise( async (resolve, reject)=>{
 			var data  = {

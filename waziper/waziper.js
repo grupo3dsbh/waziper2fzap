@@ -225,17 +225,19 @@ const WAZIPER = {
     // -----------------------------------------------------------------------
     get_qrcode: async function(instance_id, res) {
         try {
-            // Verifica se já está conectado
+            // Verifica se já está conectado (fzap usa Connected com C maiúsculo)
             const status = await fzapCall('GET', '/session/status', instance_id);
-            if (!status.success || !status.data?.connected) {
-                // Inicia conexão para gerar o QR
-                await fzapCall('POST', '/session/connect', instance_id, {
-                    subscribe: ['Message', 'ReadReceipt', 'ChatPresence', 'Presence'],
-                    immediate: true
-                }).catch(() => {});
-                // Aguarda o fzap gerar o QR code
-                await new Promise(r => setTimeout(r, 3000));
+            const isConnected = status.success && status.data && (status.data.Connected || status.data.connected);
+            if (isConnected) {
+                return res.json({ status: 'success', message: 'Instance already connected', connected: true });
             }
+            // Inicia conexão para gerar o QR
+            await fzapCall('POST', '/session/connect', instance_id, {
+                subscribe: ['Message', 'ReadReceipt', 'ChatPresence', 'Presence'],
+                immediate: true
+            }).catch(() => {});
+            // Aguarda o fzap gerar o QR code
+            await new Promise(r => setTimeout(r, 3000));
             const data = await fzapCall('GET', '/session/qr', instance_id);
             if (data.success && data.data && data.data.qrCode) {
                 return res.json({ status: 'success', message: 'Success', base64: data.data.qrCode });
@@ -963,7 +965,8 @@ const WAZIPER = {
 
             try {
                 const status = await fzapCall('GET', '/session/status', account.instance_id);
-                if (!status.success || !status.data?.loggedIn) {
+                const isLoggedIn = status.success && status.data && (status.data.LoggedIn || status.data.loggedIn);
+                if (!isLoggedIn) {
                     // Tenta reconectar
                     await WAZIPER.session(account.instance_id).catch(() => {});
                 }
@@ -1221,11 +1224,11 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
                 ]);
                 const team_id = session?.team_id || account?.team_id;
                 if (team_id) {
-                    // Busca avatar do perfil
+                    const jid = statusData.data.jid || '';
+                    // Busca avatar do perfil (usa Common.get_phone para remover sufixo :XX)
                     let avatarUrl = '';
                     try {
-                        const jid = statusData.data.jid || '';
-                        const phone = jid.split('@')[0];
+                        const phone = jid ? Common.get_phone(jid) : '';
                         if (phone) {
                             const avatarData = await fzapCall('GET', `/user/avatar?phone=${phone}`, instance_id);
                             if (avatarData.success && avatarData.data?.url) avatarUrl = avatarData.data.url;
@@ -1233,15 +1236,17 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
                     } catch (e) { /* avatar opcional */ }
 
                     const wa_info = {
-                        id:     statusData.data.jid || instance_id,
-                        name:   statusData.data.pushName || instance_id,
+                        id:     jid || instance_id,
+                        name:   statusData.data.pushName || statusData.data.name || statusData.data.PushName || instance_id,
                         avatar: avatarUrl
                     };
                     // Atualiza status da conta para ativo
                     await Common.db_update("sp_accounts", [
-                        { status: 1, pid: wa_info.id, name: wa_info.name, avatar: avatarUrl },
+                        { status: 1, name: wa_info.name, avatar: avatarUrl },
                         { token: instance_id }
                     ]);
+                    // Recria sp_whatsapp_sessions se foi deletada pelo logout
+                    await Common.upsert_session(instance_id, team_id, wa_info);
                     await WAZIPER.add_account(instance_id, team_id, wa_info, account);
                     // Notifica frontend via Socket.IO
                     io.emit(instance_id, { connected: true, name: wa_info.name, avatar: wa_info.avatar });
