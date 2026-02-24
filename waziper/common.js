@@ -1,8 +1,6 @@
-'use strict';
-
-const mysql = require('mysql');
-const config = require('./../config.js');
-const moment = require('moment-timezone');
+import mysql from 'mysql';
+import config from './../config.js';
+import moment from 'moment-timezone';
 
 const db_connect = mysql.createPool(config.database);
 
@@ -447,4 +445,4 @@ const Common = {
 	},
 };
 
-module.exports = Common;
+export default Common;
