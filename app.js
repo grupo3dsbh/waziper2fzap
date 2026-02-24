@@ -34,6 +34,16 @@ WAZIPER.app.get('/get_contacts', WAZIPER.cors, async (req, res) => {
 });
 /*END EDITED G3*/
 
+WAZIPER.app.post('/connect_phone', WAZIPER.cors, async (req, res) => {
+    var access_token = req.query.access_token;
+    var instance_id  = req.query.instance_id;
+    var phone_number = (req.body.phone_number || req.body.phone || '').replace(/\D/g, '');
+    if (!phone_number) return res.json({ status: 'error', message: 'phone_number is required' });
+    await WAZIPER.instance(access_token, instance_id, res, async (client) => {
+        await WAZIPER.connect_phone(instance_id, phone_number, res);
+    });
+});
+
 WAZIPER.app.get('/logout', WAZIPER.cors, async (req, res) => {
     var access_token = req.query.access_token;
     var instance_id = req.query.instance_id;

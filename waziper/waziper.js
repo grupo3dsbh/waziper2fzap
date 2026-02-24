@@ -84,6 +84,20 @@ async function fzapAdmin(method, endpoint, data = null) {
 }
 
 /**
+ * Normaliza o resultado de envio fzap para o callback de auto_send.
+ * Adiciona message_id como alias de data.id para compatibilidade PHP.
+ */
+function fzapSendCb(result) {
+    const ok = !!(result?.success && result?.data?.details === 'Sent');
+    const d  = result?.data ?? null;
+    return {
+        status: ok ? 1 : 0,
+        stats:  true,
+        data:   d ? { ...d, message_id: d.id } : null
+    };
+}
+
+/**
  * Garante que o usuário fzap existe para este instance_id.
  * Cria via admin API se não existir.
  */
@@ -231,20 +245,39 @@ const WAZIPER = {
 
             if (isFullyConnected) {
                 // O PHP oauth() reseta status=0 ao abrir a tela de QR.
-                // Precisamos rativar a row em sp_whatsapp_sessions para que
-                // check_login() devolva sucesso e a página redirecione.
-                const jid   = status.data.jid || '';
-                const phone = jid ? Common.get_phone(jid) : '';
+                // Reativa sp_whatsapp_sessions E atualiza sp_accounts com
+                // nome/avatar reais para que check_login() redirecione.
+                const jid     = status.data.jid || '';
+                const jidFull = jid ? Common.get_phone(jid, 'wid') : '';
+                const phone   = jid ? Common.get_phone(jid)         : '';
+
+                // Nome real via POST /user/info
+                let pushName = '';
+                try {
+                    if (jidFull) {
+                        const ui = await fzapCall('POST', '/user/info', instance_id, { phone: [jidFull] });
+                        if (ui.success && ui.data?.users?.[jidFull]) {
+                            const u = ui.data.users[jidFull];
+                            pushName = u.pushName || u.fullName || '';
+                        }
+                    }
+                } catch (e) { /* opcional */ }
+
                 let avatarUrl = '';
                 try {
                     if (phone) {
                         const av = await fzapCall('POST', '/user/avatar', instance_id, { phone, preview: false });
                         if (av.success && av.data?.url) avatarUrl = av.data.url;
                     }
-                } catch (e) { /* avatar opcional */ }
+                } catch (e) { /* opcional */ }
 
-                const wa_info = { id: jid || instance_id, name: status.data.name || instance_id, avatar: avatarUrl };
+                const wa_info = { id: jid || instance_id, name: pushName || instance_id, avatar: avatarUrl };
                 await Common.update_status_instance(instance_id, wa_info);
+                // Também atualiza sp_accounts para que o nome apareça correto na UI
+                await Common.db_update("sp_accounts", [
+                    { status: 1, can_post: 1, name: wa_info.name, avatar: avatarUrl },
+                    { token: instance_id }
+                ]);
                 return res.json({ status: 'success', message: 'Instance already connected', connected: true });
             }
 
@@ -266,6 +299,36 @@ const WAZIPER = {
             return res.json({ status: 'error', message: "The system cannot generate a WhatsApp QR code" });
         } catch (err) {
             return res.json({ status: 'error', message: "Error getting QR code" });
+        }
+    },
+
+    // -----------------------------------------------------------------------
+    // connect_phone — conectar via Pair Code (sem precisar escanear QR)
+    // -----------------------------------------------------------------------
+    connect_phone: async function(instance_id, phone_number, res) {
+        try {
+            // Garante que a sessão tem uma conexão ativa antes de pedir pair code
+            const status = await fzapCall('GET', '/session/status', instance_id);
+            if (!status.data?.connected) {
+                await fzapCall('POST', '/session/connect', instance_id, {
+                    subscribe: ['Message', 'ReadReceipt', 'ChatPresence', 'Presence'],
+                    immediate: true
+                }).catch(() => {});
+                await new Promise(r => setTimeout(r, 3000));
+            } else if (status.data?.loggedIn) {
+                return res.json({ status: 'error', message: 'Already paired' });
+            }
+
+            // Solicita o pair code para o número informado
+            const result = await fzapCall('POST', '/session/pairphone', instance_id, { phone: phone_number });
+            if (result.success && result.data?.code) {
+                return res.json({ status: 'success', message: 'Success', code: result.data.code });
+            }
+            const errMsg = result.error || 'Could not generate pair code';
+            return res.json({ status: 'error', message: errMsg });
+        } catch (err) {
+            const msg = err.response?.data?.error || err.message;
+            return res.json({ status: 'error', message: msg });
         }
     },
 
@@ -585,7 +648,7 @@ const WAZIPER = {
                         buttons: btns
                     });
                     WAZIPER.stats(instance_id, type, item, result.success ? 1 : 0);
-                    return callback({ status: result.success ? 1 : 0, stats: true, data: result.data });
+                    return callback(fzapSendCb(result));
                 }
 
                 // --- Lista ---
@@ -603,7 +666,7 @@ const WAZIPER = {
                         sections:   template.sections || []
                     });
                     WAZIPER.stats(instance_id, type, item, result.success ? 1 : 0);
-                    return callback({ status: result.success ? 1 : 0, stats: true, data: result.data });
+                    return callback(fzapSendCb(result));
                 }
 
                 // --- Mídia e Texto (padrão) ---
@@ -655,7 +718,7 @@ const WAZIPER = {
                         }
 
                         WAZIPER.stats(instance_id, type, item, result && result.success ? 1 : 0);
-                        return callback({ status: result && result.success ? 1 : 0, stats: true, data: result?.data });
+                        return callback(fzapSendCb(result));
                     } else {
                         // Apenas texto
                         if (!cleanCaption) {
@@ -1240,28 +1303,44 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
     // Atualiza status da conta quando WhatsApp conecta com sucesso
     if (event === 'Connected' || event === 'PairSuccess') {
         try {
-            const statusData = await fzapCall('GET', '/session/status', instance_id);
+            // Pequeno delay: fzap pode ainda não ter populado o JID no status
+            await new Promise(r => setTimeout(r, 1500));
+
+            // Retry para garantir JID disponível (até 3 tentativas)
+            let statusData, jid = '';
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                statusData = await fzapCall('GET', '/session/status', instance_id);
+                jid = statusData?.data?.jid || '';
+                if (jid) break;
+                console.log(YELLOW + `[webhook] ${instance_id} tentativa ${attempt}/3 — aguardando JID...` + RESET);
+                await new Promise(r => setTimeout(r, 2000));
+            }
+
             const [session, account] = await Promise.all([
                 Common.db_get("sp_whatsapp_sessions", [{ instance_id }]),
                 Common.db_get("sp_accounts", [{ token: instance_id }])
             ]);
             const team_id = session?.team_id || account?.team_id;
             if (team_id) {
-                const jid     = statusData?.data?.jid || '';
                 const jidFull = jid ? Common.get_phone(jid, 'wid') : ''; // ex: 553...@s.whatsapp.net
                 const phone   = jid ? Common.get_phone(jid)         : ''; // ex: 553...
+
+                console.log(CYAN + `[webhook] ${instance_id} — jid=${jid} jidFull=${jidFull} phone=${phone}` + RESET);
 
                 // Busca nome real via POST /user/info (status.data.name é o nome do token, não WhatsApp)
                 let pushName = '';
                 try {
                     if (jidFull) {
                         const ui = await fzapCall('POST', '/user/info', instance_id, { phone: [jidFull] });
+                        console.log(CYAN + `[webhook] user/info: ${JSON.stringify(ui?.data?.users)}` + RESET);
                         if (ui.success && ui.data?.users?.[jidFull]) {
                             const u = ui.data.users[jidFull];
                             pushName = u.pushName || u.fullName || '';
                         }
                     }
-                } catch (e) { /* opcional */ }
+                } catch (e) {
+                    console.log(YELLOW + `[webhook] user/info falhou: ${e.message}` + RESET);
+                }
 
                 // Busca avatar via POST /user/avatar
                 let avatarUrl = '';
@@ -1277,7 +1356,7 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
                     name:   pushName || instance_id,
                     avatar: avatarUrl
                 };
-                console.log(GREEN + `[webhook] ${instance_id} conectado como: ${wa_info.name}` + RESET);
+                console.log(GREEN + `[webhook] ${instance_id} conectado como: "${wa_info.name}" (${wa_info.id})` + RESET);
 
                 // Atualiza sp_accounts com status=1, can_post=1
                 await Common.db_update("sp_accounts", [
