@@ -1166,6 +1166,12 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
     // Repassa evento para webhook configurado no wapizer
     WAZIPER.webhook(instance_id, { event, data });
 
+    // QR Code — notifica frontend em tempo real via Socket.IO
+    if (event === 'QR') {
+        const qrCode = data.qrCode || data.qr || data.code;
+        if (qrCode) io.emit(instance_id, { qrcode: qrCode });
+    }
+
     // Processa mensagens recebidas (chatbot + autoresponder)
     if (event === 'Message') {
         const message = data;
@@ -1209,19 +1215,37 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
         try {
             const statusData = await fzapCall('GET', '/session/status', instance_id);
             if (statusData.success && statusData.data) {
-                const session = await Common.db_get("sp_whatsapp_sessions", [{ instance_id }]);
-                if (session) {
+                const [session, account] = await Promise.all([
+                    Common.db_get("sp_whatsapp_sessions", [{ instance_id }]),
+                    Common.db_get("sp_accounts", [{ token: instance_id }])
+                ]);
+                const team_id = session?.team_id || account?.team_id;
+                if (team_id) {
+                    // Busca avatar do perfil
+                    let avatarUrl = '';
+                    try {
+                        const jid = statusData.data.jid || '';
+                        const phone = jid.split('@')[0];
+                        if (phone) {
+                            const avatarData = await fzapCall('GET', `/user/avatar?phone=${phone}`, instance_id);
+                            if (avatarData.success && avatarData.data?.url) avatarUrl = avatarData.data.url;
+                        }
+                    } catch (e) { /* avatar opcional */ }
+
                     const wa_info = {
-                        id:   statusData.data.jid || instance_id,
-                        name: statusData.data.pushName || instance_id
+                        id:     statusData.data.jid || instance_id,
+                        name:   statusData.data.pushName || instance_id,
+                        avatar: avatarUrl
                     };
-                    const account = await Common.db_get("sp_accounts", [{ token: instance_id }]);
                     // Atualiza status da conta para ativo
                     await Common.db_update("sp_accounts", [
-                        { status: 1, pid: wa_info.id, name: wa_info.name },
+                        { status: 1, pid: wa_info.id, name: wa_info.name, avatar: avatarUrl },
                         { token: instance_id }
                     ]);
-                    await WAZIPER.add_account(instance_id, session.team_id, wa_info, account);
+                    await WAZIPER.add_account(instance_id, team_id, wa_info, account);
+                    // Notifica frontend via Socket.IO
+                    io.emit(instance_id, { connected: true, name: wa_info.name, avatar: wa_info.avatar });
+                    console.log(GREEN + `[webhook] ${instance_id} conectado como: ${wa_info.name}` + RESET);
                 }
             }
         } catch (err) {
@@ -1241,8 +1265,5 @@ export default WAZIPER;
 // ---------------------------------------------------------------------------
 // Timers de manutenção
 // ---------------------------------------------------------------------------
-setInterval(() => { WAZIPER.live_back().catch(() => {}); }, 10000);
-setInterval(() => { WAZIPER.bulk_messaging().catch(() => {}); }, 2000);
-
 cron.schedule('*/10 * * * * *', () => { WAZIPER.live_back().catch(() => {}); });
 cron.schedule('*/2 * * * * *',  () => { WAZIPER.bulk_messaging().catch(() => {}); });
