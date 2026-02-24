@@ -965,9 +965,12 @@ const WAZIPER = {
 
             try {
                 const status = await fzapCall('GET', '/session/status', account.instance_id);
-                const isLoggedIn = status.success && status.data && (status.data.LoggedIn || status.data.loggedIn);
-                if (!isLoggedIn) {
-                    // Tenta reconectar
+                // Usa Connected (capital) pois LoggedIn pode ser false em sessões válidas aguardando QR
+                const isActive = status.success && status.data &&
+                    (status.data.Connected || status.data.connected ||
+                     status.data.LoggedIn  || status.data.loggedIn);
+                if (!isActive) {
+                    // Reconecta apenas se o socket está completamente inativo
                     await WAZIPER.session(account.instance_id).catch(() => {});
                 }
             } catch (err) {
@@ -1216,42 +1219,49 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
     // Atualiza status da conta quando WhatsApp conecta com sucesso
     if (event === 'Connected' || event === 'PairSuccess') {
         try {
-            const statusData = await fzapCall('GET', '/session/status', instance_id);
-            if (statusData.success && statusData.data) {
-                const [session, account] = await Promise.all([
-                    Common.db_get("sp_whatsapp_sessions", [{ instance_id }]),
-                    Common.db_get("sp_accounts", [{ token: instance_id }])
-                ]);
-                const team_id = session?.team_id || account?.team_id;
-                if (team_id) {
-                    const jid = statusData.data.jid || '';
-                    // Busca avatar do perfil (usa Common.get_phone para remover sufixo :XX)
-                    let avatarUrl = '';
-                    try {
-                        const phone = jid ? Common.get_phone(jid) : '';
-                        if (phone) {
-                            const avatarData = await fzapCall('GET', `/user/avatar?phone=${phone}`, instance_id);
-                            if (avatarData.success && avatarData.data?.url) avatarUrl = avatarData.data.url;
-                        }
-                    } catch (e) { /* avatar opcional */ }
+            // data = payload do webhook (pode conter jid/pushName diretamente)
+            console.log(YELLOW + `[webhook] Connected payload: ${JSON.stringify(data)}` + RESET);
 
-                    const wa_info = {
-                        id:     jid || instance_id,
-                        name:   statusData.data.pushName || statusData.data.name || statusData.data.PushName || instance_id,
-                        avatar: avatarUrl
-                    };
-                    // Atualiza status da conta para ativo
-                    await Common.db_update("sp_accounts", [
-                        { status: 1, name: wa_info.name, avatar: avatarUrl },
-                        { token: instance_id }
-                    ]);
-                    // Recria sp_whatsapp_sessions se foi deletada pelo logout
-                    await Common.upsert_session(instance_id, team_id, wa_info);
-                    await WAZIPER.add_account(instance_id, team_id, wa_info, account);
-                    // Notifica frontend via Socket.IO
-                    io.emit(instance_id, { connected: true, name: wa_info.name, avatar: wa_info.avatar });
-                    console.log(GREEN + `[webhook] ${instance_id} conectado como: ${wa_info.name}` + RESET);
-                }
+            const statusData = await fzapCall('GET', '/session/status', instance_id);
+            const [session, account] = await Promise.all([
+                Common.db_get("sp_whatsapp_sessions", [{ instance_id }]),
+                Common.db_get("sp_accounts", [{ token: instance_id }])
+            ]);
+            const team_id = session?.team_id || account?.team_id;
+            if (team_id) {
+                // Prefere usar dados do payload do webhook; fallback para /session/status
+                const jid      = data.jid  || data.Jid  || statusData?.data?.jid  || '';
+                const pushName = data.pushName || data.name || data.PushName ||
+                                 statusData?.data?.pushName || statusData?.data?.name || statusData?.data?.PushName || '';
+
+                // Busca avatar: tenta JID completo (553...@s.whatsapp.net) e depois só número
+                let avatarUrl = '';
+                try {
+                    const jidFull = jid ? Common.get_phone(jid, 'wid') : ''; // ex: 553...@s.whatsapp.net
+                    const jidNum  = jid ? Common.get_phone(jid)         : ''; // ex: 553...
+                    for (const phone of [jidFull, jidNum]) {
+                        if (!phone) continue;
+                        const avatarData = await fzapCall('GET', `/user/avatar?phone=${encodeURIComponent(phone)}`, instance_id);
+                        if (avatarData.success && avatarData.data?.url) { avatarUrl = avatarData.data.url; break; }
+                    }
+                } catch (e) { /* avatar opcional */ }
+
+                const wa_info = {
+                    id:     jid || instance_id,
+                    name:   pushName || instance_id,
+                    avatar: avatarUrl
+                };
+                // Atualiza sp_accounts com status=1, can_post=1
+                await Common.db_update("sp_accounts", [
+                    { status: 1, can_post: 1, name: wa_info.name, avatar: avatarUrl },
+                    { token: instance_id }
+                ]);
+                // Ativa sp_whatsapp_sessions (UPDATE na row criada pelo PHP — não INSERT)
+                await Common.update_status_instance(instance_id, wa_info);
+                await WAZIPER.add_account(instance_id, team_id, wa_info, account);
+                // Notifica frontend via Socket.IO
+                io.emit(instance_id, { connected: true, name: wa_info.name, avatar: wa_info.avatar });
+                console.log(GREEN + `[webhook] ${instance_id} conectado como: ${wa_info.name || instance_id}` + RESET);
             }
         } catch (err) {
             console.error(YELLOW + `[webhook] Erro ao processar Connected: ${err.message}` + RESET);
