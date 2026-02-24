@@ -321,8 +321,8 @@ const WAZIPER = {
 
             // Solicita o pair code para o número informado
             const result = await fzapCall('POST', '/session/pairphone', instance_id, { phone: phone_number });
-            if (result.success && result.data?.code) {
-                return res.json({ status: 'success', message: 'Success', code: result.data.code });
+            if (result.success && result.data?.linkingCode) {
+                return res.json({ status: 'success', message: 'Success', code: result.data.linkingCode });
             }
             const errMsg = result.error || 'Could not generate pair code';
             return res.json({ status: 'error', message: errMsg });
