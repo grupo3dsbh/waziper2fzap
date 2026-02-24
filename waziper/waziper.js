@@ -1,6 +1,5 @@
 'use strict';
 
-const fs = require('fs');
 const http = require('http');
 const express = require('express');
 const moment = require('moment-timezone');
@@ -19,7 +18,6 @@ const bulks = {};
 const chatbots = {};
 const limit_messages = {};
 const stats_history = {};
-let messageCounter = 0;
 
 // Cores ANSI para logs
 const RED    = '\x1b[91m';
@@ -96,9 +94,11 @@ async function ensureFzapUser(instance_id) {
     } catch (err) {
         if (err.response && (err.response.status === 401 || err.response.status === 403)) {
             try {
+                const webhookUrl = `${config.fzap.webhook_base_url}/webhook/receive/${instance_id}`;
                 await fzapAdmin('POST', '/admin/users', {
                     name: instance_id,
                     token: instance_id,
+                    webhook: webhookUrl,
                     events: 'All'
                 });
                 console.log(GREEN + `[fzap] Usuário criado no fzap: ${instance_id}` + RESET);
@@ -186,7 +186,7 @@ const WAZIPER = {
         await ensureFzapUser(instance_id);
         try {
             await fzapCall('POST', '/session/connect', instance_id, {
-                subscribe: ['Message', 'ReadReceipt', 'ChatPresence', 'Connected', 'Disconnected', 'LoggedOut', 'QR'],
+                subscribe: ['Message', 'ReadReceipt', 'ChatPresence', 'Presence'],
                 immediate: true
             });
         } catch (err) {
@@ -226,6 +226,17 @@ const WAZIPER = {
     // -----------------------------------------------------------------------
     get_qrcode: async function(instance_id, res) {
         try {
+            // Verifica se já está conectado
+            const status = await fzapCall('GET', '/session/status', instance_id);
+            if (!status.success || !status.data?.connected) {
+                // Inicia conexão para gerar o QR
+                await fzapCall('POST', '/session/connect', instance_id, {
+                    subscribe: ['Message', 'ReadReceipt', 'ChatPresence', 'Presence'],
+                    immediate: true
+                }).catch(() => {});
+                // Aguarda o fzap gerar o QR code
+                await new Promise(r => setTimeout(r, 3000));
+            }
             const data = await fzapCall('GET', '/session/qr', instance_id);
             if (data.success && data.data && data.data.qrCode) {
                 return res.json({ status: 'success', message: 'Success', base64: data.data.qrCode });
@@ -718,31 +729,27 @@ const WAZIPER = {
             .replace('%wa_nome%', cleanedWaName)
             .replace('%wa_numero%', userPhone);
 
-        const whereClause = [{ whatsapp: userPhone }, { instance_id }];
-        const responseRecord = await Common.db_fetch("sp_whatsapp_ar_responses", whereClause);
+        const responseRecord = await Common.db_query(
+            `SELECT * FROM sp_whatsapp_ar_responses WHERE whatsapp = '${userPhone}' AND instance_id = '${instance_id}' LIMIT 1`,
+            false
+        );
 
         if (responseRecord && responseRecord.length > 0) {
             const timeElapsed = now - new Date(responseRecord[0].last_response).getTime() / 1000;
             if (timeElapsed < (item.delay || 0) * 60) return false;
             await Common.db_update("sp_whatsapp_ar_responses", [{ last_response: new Date() }, { id: responseRecord[0].id }]);
         } else {
-            await Common.db_insert("sp_whatsapp_ar_responses", {
-                whatsapp: userPhone,
-                instance_id,
-                last_response: new Date()
-            });
+            await Common.db_query(
+                `INSERT INTO sp_whatsapp_ar_responses (whatsapp, instance_id, last_response) VALUES ('${userPhone}', '${instance_id}', NOW())`,
+                true
+            );
         }
-
-        // Indica que está digitando
-        await fzapCall('POST', '/chat/presence', instance_id, { phone: chat_id, state: 'composing' }).catch(() => {});
 
         const msg_info = { cleanedWaName, userPhone, idConversa, msgConversa, participanteGrupo, nextAction: '', inputName: '', saveData: '' };
 
         await WAZIPER.auto_send(instance_id, chat_id, chat_id, "autoresponder", item, false, msg_info, (result) => {
             console.log(CYAN + `[autoresponder] ${instance_id} → ${userPhone}: status=${result.status}` + RESET);
         });
-
-        await fzapCall('POST', '/chat/presence', instance_id, { phone: chat_id, state: 'paused' }).catch(() => {});
         return false;
     },
 
@@ -798,12 +805,9 @@ const WAZIPER = {
                 participanteGrupo, nextAction: nextaction, inputName: inputname, saveData: savedata
             };
 
-            await fzapCall('POST', '/chat/presence', instance_id, { phone: chat_id, state: 'composing' }).catch(() => {});
-            await new Promise(r => setTimeout(r, 2000));
             await WAZIPER.auto_send(instance_id, chat_id, chat_id, "chatbot", item, false, msg_info, (result) => {
                 console.log(CYAN + `[chatbot] ${instance_id} → ${userPhone}: status=${result.status}` + RESET);
             });
-            await fzapCall('POST', '/chat/presence', instance_id, { phone: chat_id, state: 'paused' }).catch(() => {});
         }
 
         return false;
@@ -1149,9 +1153,13 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
 
     const instance_id = req.params.instance_id;
     const payload     = req.body;
-    if (!payload || !payload.event) return;
+    if (!payload) return;
 
-    const event = payload.event;
+    // fzap envia o tipo do evento no campo "type" (wuzapi-compatible)
+    // Suporta também "event" para compatibilidade futura
+    const event = payload.type || payload.event;
+    if (!event) return;
+
     const data  = payload.data || {};
 
     console.log(BLUE + `[webhook] ${instance_id} ← evento: ${event}` + RESET);
@@ -1165,19 +1173,16 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
 
         // Ignora mensagens enviadas por nós mesmos e status broadcast
         if (message.key?.fromMe === true) {
-            // Registra no histórico de AR para evitar auto-resposta cruzada
+            // Registra no histórico de AR para evitar auto-resposta cruzada quando enviamos
             const chat_id = message.key?.remoteJid || '';
             if (!chat_id.includes('@g.us')) {
                 const chatid = chat_id.split('@')[0];
-                const existing = await Common.db_fetch("sp_whatsapp_ar_responses", [{ whatsapp: chatid }, { instance_id }]);
-                if (existing) {
-                    await Common.db_delete("sp_whatsapp_ar_responses", [{ whatsapp: chatid }, { instance_id }]);
-                }
-                await Common.db_insert("sp_whatsapp_ar_responses", {
-                    whatsapp: chatid,
-                    instance_id,
-                    last_response: new Date()
-                });
+                await Common.db_query(
+                    `INSERT INTO sp_whatsapp_ar_responses (whatsapp, instance_id, last_response)
+                     VALUES ('${chatid}', '${instance_id}', NOW())
+                     ON DUPLICATE KEY UPDATE last_response = NOW()`,
+                    true
+                );
             }
             return;
         }
@@ -1188,19 +1193,19 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
         const chat_id   = message.key?.remoteJid || '';
         const user_type = chat_id.includes('@g.us') ? "group" : "user";
 
-        // Chatbot
+        // Chatbot (dispara sem bloquear o loop do webhook)
         WAZIPER.chatbot(instance_id, user_type, message).catch(err => {
             console.error(RED + `[chatbot] Erro: ${err.message}` + RESET);
         });
 
-        // Autoresponder (com pequeno delay)
-        await Common.sleep(1000);
+        // Autoresponder (com pequeno delay para não sobrepor o chatbot)
+        await new Promise(r => setTimeout(r, 1000));
         WAZIPER.autoresponder(instance_id, user_type, message).catch(err => {
             console.error(RED + `[autoresponder] Erro: ${err.message}` + RESET);
         });
     }
 
-    // Atualiza status da conta quando conectado
+    // Atualiza status da conta quando WhatsApp conecta com sucesso
     if (event === 'Connected' || event === 'PairSuccess') {
         try {
             const statusData = await fzapCall('GET', '/session/status', instance_id);
@@ -1212,7 +1217,11 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
                         name: statusData.data.pushName || instance_id
                     };
                     const account = await Common.db_get("sp_accounts", [{ token: instance_id }]);
-                    await Common.update_status_instance(instance_id, wa_info);
+                    // Atualiza status da conta para ativo
+                    await Common.db_update("sp_accounts", [
+                        { status: 1, pid: wa_info.id, name: wa_info.name },
+                        { token: instance_id }
+                    ]);
                     await WAZIPER.add_account(instance_id, session.team_id, wa_info, account);
                 }
             }
@@ -1221,7 +1230,7 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
         }
     }
 
-    // Logout — limpa sessão
+    // Logout — marca conta como inativa no DB
     if (event === 'LoggedOut') {
         await Common.db_update("sp_accounts", [{ status: 0 }, { token: instance_id }]);
         console.log(YELLOW + `[webhook] ${instance_id} deslogado do WhatsApp` + RESET);
