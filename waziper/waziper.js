@@ -857,17 +857,8 @@ const WAZIPER = {
     // -----------------------------------------------------------------------
     chatbot: async function(instance_id, user_type, message) {
         const chat_id = message.key?.remoteJid || '';
-        console.log(CYAN + `[chatbot] ${instance_id} — chat_id=${chat_id} user_type=${user_type}` + RESET);
-        console.log(CYAN + `[chatbot] message keys: ${Object.keys(message).join(', ')}` + RESET);
-        console.log(CYAN + `[chatbot] message.key=${JSON.stringify(message.key)}` + RESET);
-        console.log(CYAN + `[chatbot] message.message=${JSON.stringify(message.message)}` + RESET);
-        console.log(CYAN + `[chatbot] message.pushName=${message.pushName}` + RESET);
         const items   = await Common.db_fetch("sp_whatsapp_chatbot", [{ instance_id }, { status: 1 }, { run: 1 }]);
-        if (!items) {
-            console.log(YELLOW + `[chatbot] ${instance_id} — nenhum item no DB (status=1, run=1)` + RESET);
-            return false;
-        }
-        console.log(CYAN + `[chatbot] ${instance_id} — ${items.length} item(s) encontrado(s) no DB` + RESET);
+        if (!items) return false;
 
         const cleanedWaName = (message.pushName || '').replace(/[&<>"']/g, '');
         const userPhone     = chat_id.split('@')[0];
@@ -881,7 +872,6 @@ const WAZIPER = {
         } catch(e) {}
 
         const content = msgConversa.toLowerCase();
-        console.log(CYAN + `[chatbot] ${instance_id} — msgConversa="${msgConversa}" content="${content}"` + RESET);
         let sent = false;
 
         for (const item of items) {
@@ -1273,7 +1263,11 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
     const event = payload.type || payload.event;
     if (!event) return;
 
-    const data  = payload.data || {};
+    // fzap coloca os dados da mensagem em payload.event (objeto), não em payload.data
+    // payload.type  = string do evento ("Message", "QR", "Connected"...)
+    // payload.event = objeto com os dados do evento (Info, Message, etc.)
+    const fzapEventData = (payload.event && typeof payload.event === 'object') ? payload.event : {};
+    const data          = payload.data || fzapEventData;
 
     console.log(BLUE + `[webhook] ${instance_id} ← evento: ${event}` + RESET);
 
@@ -1288,15 +1282,26 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
 
     // Processa mensagens recebidas (chatbot + autoresponder)
     if (event === 'Message') {
-        const message = data;
-        console.log(CYAN + `[webhook/Message] ${instance_id} — data keys: ${Object.keys(data).join(', ')}` + RESET);
-        console.log(CYAN + `[webhook/Message] ${instance_id} — data.key=${JSON.stringify(data.key)} data.message=${JSON.stringify(data.message)}` + RESET);
+        // Normaliza payload fzap → formato Baileys/wuzapi esperado pelo restante do código
+        // fzap:  payload.event.Info.Chat, payload.event.Info.IsFromMe, payload.event.Message, ...
+        // nosso: message.key.remoteJid,   message.key.fromMe,          message.message, ...
+        const info = fzapEventData.Info || {};
+        const message = {
+            key: {
+                remoteJid:   info.Chat   || '',
+                fromMe:      info.IsFromMe === true,
+                id:          info.ID      || '',
+                participant: info.IsGroup ? (info.Sender || '') : undefined,
+            },
+            message:   fzapEventData.Message || null,
+            pushName:  info.PushName || '',
+        };
 
         // Ignora mensagens enviadas por nós mesmos e status broadcast
-        if (message.key?.fromMe === true) {
+        if (message.key.fromMe === true) {
             // Registra no histórico de AR para evitar auto-resposta cruzada quando enviamos
-            const chat_id = message.key?.remoteJid || '';
-            if (!chat_id.includes('@g.us')) {
+            const chat_id = message.key.remoteJid;
+            if (chat_id && !chat_id.includes('@g.us')) {
                 const chatid = chat_id.split('@')[0];
                 await Common.db_query(
                     `INSERT INTO sp_whatsapp_ar_responses (whatsapp, instance_id, last_response)
@@ -1308,10 +1313,10 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
             return;
         }
 
-        if (message.key?.remoteJid === "status@broadcast") return;
+        if (message.key.remoteJid === "status@broadcast") return;
         if (!message.message) return;
 
-        const chat_id   = message.key?.remoteJid || '';
+        const chat_id   = message.key.remoteJid;
         const user_type = chat_id.includes('@g.us') ? "group" : "user";
 
         // Chatbot (dispara sem bloquear o loop do webhook)
