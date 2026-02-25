@@ -1412,19 +1412,46 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
 
                 console.log(CYAN + `[webhook] ${instance_id} — jid=${jid} jidFull=${jidFull} phone=${phone}` + RESET);
 
-                // Busca nome real via POST /user/info (status.data.name é o nome do token, não WhatsApp)
-                let pushName = '';
-                try {
-                    if (jidFull) {
+                // Busca nome real via POST /user/info — prioridade: pushName > fullName > businessName
+                // fzap pode retornar found: false na primeira tentativa; se isso ocorrer, salva
+                // com fallback e dispara retry em background para atualizar assim que disponível.
+                const fetchPushName = async (jidFull) => {
+                    try {
                         const ui = await fzapCall('POST', '/user/info', instance_id, { phone: [jidFull] });
                         console.log(CYAN + `[webhook] user/info: ${JSON.stringify(ui?.data?.users)}` + RESET);
                         if (ui.success && ui.data?.users?.[jidFull]) {
                             const u = ui.data.users[jidFull];
-                            pushName = u.pushName || u.fullName || u.businessName || '';
+                            if (u.found !== false) {
+                                return u.pushName || u.fullName || u.businessName || '';
+                            }
                         }
+                    } catch (e) {
+                        console.log(YELLOW + `[webhook] user/info falhou: ${e.message}` + RESET);
                     }
-                } catch (e) {
-                    console.log(YELLOW + `[webhook] user/info falhou: ${e.message}` + RESET);
+                    return null; // found: false ou erro
+                };
+
+                let pushName = '';
+                if (jidFull) {
+                    pushName = await fetchPushName(jidFull) ?? '';
+
+                    // Se não encontrou, agenda retry em background (não bloqueia o evento Connected)
+                    if (!pushName) {
+                        console.log(YELLOW + `[webhook] ${instance_id} nome não encontrado, agendando retry em background...` + RESET);
+                        (async () => {
+                            for (let i = 1; i <= 5; i++) {
+                                await new Promise(r => setTimeout(r, 5000 * i)); // 5s, 10s, 15s, 20s, 25s
+                                const nome = await fetchPushName(jidFull);
+                                if (nome) {
+                                    console.log(GREEN + `[webhook] ${instance_id} nome encontrado no retry ${i}: "${nome}"` + RESET);
+                                    await Common.db_update("sp_accounts", [{ name: nome }, { token: instance_id }]);
+                                    await Common.update_status_instance(instance_id, { id: jid, name: nome });
+                                    io.emit(instance_id, { connected: true, name: nome });
+                                    break;
+                                }
+                            }
+                        })().catch(e => console.error(RED + `[webhook] retry nome falhou: ${e.message}` + RESET));
+                    }
                 }
 
                 // Busca avatar via POST /user/avatar
