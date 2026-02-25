@@ -867,8 +867,15 @@ const WAZIPER = {
 
         let msgConversa = '';
         try {
-            msgConversa = message.message?.conversation ||
-                          message.message?.extendedTextMessage?.text || '';
+            if (message.message?.templateButtonReplyMessage)
+                msgConversa = message.message.templateButtonReplyMessage.selectedDisplayText || '';
+            else if (message.message?.listResponseMessage)
+                msgConversa = (message.message.listResponseMessage.title || '') + ' ' + (message.message.listResponseMessage.description || '');
+            else
+                msgConversa = message.message?.conversation ||
+                              message.message?.extendedTextMessage?.text ||
+                              message.message?.imageMessage?.caption ||
+                              message.message?.videoMessage?.caption || '';
         } catch(e) {}
 
         const content = msgConversa.toLowerCase();
@@ -889,9 +896,34 @@ const WAZIPER = {
 
             let run = false;
             if (item.type_search == 1) {
+                // Contém: mensagem contém a palavra-chave
                 run = keywords.some(kw => content.includes(kw));
             } else if (item.type_search == 2) {
+                // Exato: mensagem igual à palavra-chave
                 run = keywords.some(kw => content === kw);
+            } else if (item.type_search == 3) {
+                // Partes ordenadas: "fal.atend" → ["fal","atend"] devem aparecer EM ORDEM
+                // na mensagem, cada parte no início de uma palavra (fronteira de palavra)
+                // Exemplo: "fal.atend" reconhece "falar com atendente" e "quero falar com um atendente"
+                run = keywords.some(kw => {
+                    const parts = kw.split('.');
+                    let idx = 0;
+                    return parts.every(part => {
+                        const pos = content.indexOf(part.trim(), idx);
+                        if (pos !== -1 && (pos === 0 || /\s/.test(content.charAt(pos - 1)))) {
+                            idx = pos + part.length;
+                            return true;
+                        }
+                        return false;
+                    });
+                });
+            } else if (item.type_search == 4) {
+                // Prefixo com contexto: keyword presente E há conteúdo adicional após ela
+                // Usado em fluxos de agendamento (ex: "AGENDAR manicure" extrai "manicure")
+                run = keywords.some(kw => {
+                    const pos = content.indexOf(kw);
+                    return pos !== -1 && content.substring(pos).trim().length > kw.length;
+                });
             } else {
                 run = keywords.some(kw => content.includes(kw));
             }
@@ -907,9 +939,30 @@ const WAZIPER = {
             await WAZIPER.auto_send(instance_id, chat_id, chat_id, "chatbot", item, false, msg_info, (result) => {
                 console.log(CYAN + `[chatbot] ${instance_id} → ${userPhone}: status=${result.status}` + RESET);
             });
+
+            // Dispara automaticamente o próximo passo do fluxo (nextaction encadeado)
+            if (nextaction) {
+                await WAZIPER._chatbot_nextaction(instance_id, chat_id, nextaction, msg_info, 0);
+            }
         }
 
-        return false;
+        return sent; // true se o chatbot respondeu, false caso contrário
+    },
+
+    // Dispara o próximo item do chatbot pelo campo "nextaction" (encadeamento de fluxo)
+    _chatbot_nextaction: async function(instance_id, chat_id, nextaction, msg_info, depth) {
+        if (depth > 5) return; // proteção contra loop infinito
+        const items_next = await Common.db_fetch("sp_whatsapp_chatbot", [{ keywords: nextaction }, { instance_id }, { status: 1 }, { run: 1 }]);
+        if (!items_next || items_next.length === 0) return;
+        const next_item = items_next[0];
+        await new Promise(r => setTimeout(r, 5000));
+        await WAZIPER.auto_send(instance_id, chat_id, chat_id, "chatbot", next_item, false, msg_info, (result) => {
+            console.log(CYAN + `[chatbot/next] ${instance_id} → ${chat_id}: step=${depth+1} status=${result.status}` + RESET);
+        });
+        const next_next = next_item.nextaction || '';
+        if (next_next && next_next !== nextaction) {
+            await WAZIPER._chatbot_nextaction(instance_id, chat_id, next_next, msg_info, depth + 1);
+        }
     },
 
     // -----------------------------------------------------------------------
@@ -1319,16 +1372,17 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
         const chat_id   = message.key.remoteJid;
         const user_type = chat_id.includes('@g.us') ? "group" : "user";
 
-        // Chatbot (dispara sem bloquear o loop do webhook)
-        WAZIPER.chatbot(instance_id, user_type, message).catch(err => {
+        // Chatbot tem prioridade: se respondeu, o autoresponder não dispara
+        const chatbotRespondeu = await WAZIPER.chatbot(instance_id, user_type, message).catch(err => {
             console.error(RED + `[chatbot] Erro: ${err.message}` + RESET);
+            return false;
         });
 
-        // Autoresponder (com pequeno delay para não sobrepor o chatbot)
-        await new Promise(r => setTimeout(r, 1000));
-        WAZIPER.autoresponder(instance_id, user_type, message).catch(err => {
-            console.error(RED + `[autoresponder] Erro: ${err.message}` + RESET);
-        });
+        if (!chatbotRespondeu) {
+            WAZIPER.autoresponder(instance_id, user_type, message).catch(err => {
+                console.error(RED + `[autoresponder] Erro: ${err.message}` + RESET);
+            });
+        }
     }
 
     // Atualiza status da conta quando WhatsApp conecta com sucesso
@@ -1358,19 +1412,46 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
 
                 console.log(CYAN + `[webhook] ${instance_id} — jid=${jid} jidFull=${jidFull} phone=${phone}` + RESET);
 
-                // Busca nome real via POST /user/info (status.data.name é o nome do token, não WhatsApp)
-                let pushName = '';
-                try {
-                    if (jidFull) {
+                // Busca nome real via POST /user/info — prioridade: pushName > fullName > businessName
+                // fzap pode retornar found: false na primeira tentativa; se isso ocorrer, salva
+                // com fallback e dispara retry em background para atualizar assim que disponível.
+                const fetchPushName = async (jidFull) => {
+                    try {
                         const ui = await fzapCall('POST', '/user/info', instance_id, { phone: [jidFull] });
                         console.log(CYAN + `[webhook] user/info: ${JSON.stringify(ui?.data?.users)}` + RESET);
                         if (ui.success && ui.data?.users?.[jidFull]) {
                             const u = ui.data.users[jidFull];
-                            pushName = u.pushName || u.fullName || u.businessName || '';
+                            if (u.found !== false) {
+                                return u.pushName || u.fullName || u.businessName || '';
+                            }
                         }
+                    } catch (e) {
+                        console.log(YELLOW + `[webhook] user/info falhou: ${e.message}` + RESET);
                     }
-                } catch (e) {
-                    console.log(YELLOW + `[webhook] user/info falhou: ${e.message}` + RESET);
+                    return null; // found: false ou erro
+                };
+
+                let pushName = '';
+                if (jidFull) {
+                    pushName = await fetchPushName(jidFull) ?? '';
+
+                    // Se não encontrou, agenda retry em background (não bloqueia o evento Connected)
+                    if (!pushName) {
+                        console.log(YELLOW + `[webhook] ${instance_id} nome não encontrado, agendando retry em background...` + RESET);
+                        (async () => {
+                            for (let i = 1; i <= 5; i++) {
+                                await new Promise(r => setTimeout(r, 5000 * i)); // 5s, 10s, 15s, 20s, 25s
+                                const nome = await fetchPushName(jidFull);
+                                if (nome) {
+                                    console.log(GREEN + `[webhook] ${instance_id} nome encontrado no retry ${i}: "${nome}"` + RESET);
+                                    await Common.db_update("sp_accounts", [{ name: nome }, { token: instance_id }]);
+                                    await Common.update_status_instance(instance_id, { id: jid, name: nome });
+                                    io.emit(instance_id, { connected: true, name: nome });
+                                    break;
+                                }
+                            }
+                        })().catch(e => console.error(RED + `[webhook] retry nome falhou: ${e.message}` + RESET));
+                    }
                 }
 
                 // Busca avatar via POST /user/avatar
