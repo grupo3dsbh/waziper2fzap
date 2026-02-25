@@ -946,7 +946,7 @@ const WAZIPER = {
             }
         }
 
-        return false;
+        return sent; // true se o chatbot respondeu, false caso contrário
     },
 
     // Dispara o próximo item do chatbot pelo campo "nextaction" (encadeamento de fluxo)
@@ -1372,16 +1372,17 @@ WAZIPER.app.post('/webhook/receive/:instance_id', WAZIPER.cors, async (req, res)
         const chat_id   = message.key.remoteJid;
         const user_type = chat_id.includes('@g.us') ? "group" : "user";
 
-        // Chatbot (dispara sem bloquear o loop do webhook)
-        WAZIPER.chatbot(instance_id, user_type, message).catch(err => {
+        // Chatbot tem prioridade: se respondeu, o autoresponder não dispara
+        const chatbotRespondeu = await WAZIPER.chatbot(instance_id, user_type, message).catch(err => {
             console.error(RED + `[chatbot] Erro: ${err.message}` + RESET);
+            return false;
         });
 
-        // Autoresponder (com pequeno delay para não sobrepor o chatbot)
-        await new Promise(r => setTimeout(r, 1000));
-        WAZIPER.autoresponder(instance_id, user_type, message).catch(err => {
-            console.error(RED + `[autoresponder] Erro: ${err.message}` + RESET);
-        });
+        if (!chatbotRespondeu) {
+            WAZIPER.autoresponder(instance_id, user_type, message).catch(err => {
+                console.error(RED + `[autoresponder] Erro: ${err.message}` + RESET);
+            });
+        }
     }
 
     // Atualiza status da conta quando WhatsApp conecta com sucesso
