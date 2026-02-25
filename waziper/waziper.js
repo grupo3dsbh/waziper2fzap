@@ -867,8 +867,15 @@ const WAZIPER = {
 
         let msgConversa = '';
         try {
-            msgConversa = message.message?.conversation ||
-                          message.message?.extendedTextMessage?.text || '';
+            if (message.message?.templateButtonReplyMessage)
+                msgConversa = message.message.templateButtonReplyMessage.selectedDisplayText || '';
+            else if (message.message?.listResponseMessage)
+                msgConversa = (message.message.listResponseMessage.title || '') + ' ' + (message.message.listResponseMessage.description || '');
+            else
+                msgConversa = message.message?.conversation ||
+                              message.message?.extendedTextMessage?.text ||
+                              message.message?.imageMessage?.caption ||
+                              message.message?.videoMessage?.caption || '';
         } catch(e) {}
 
         const content = msgConversa.toLowerCase();
@@ -889,9 +896,34 @@ const WAZIPER = {
 
             let run = false;
             if (item.type_search == 1) {
+                // Contém: mensagem contém a palavra-chave
                 run = keywords.some(kw => content.includes(kw));
             } else if (item.type_search == 2) {
+                // Exato: mensagem igual à palavra-chave
                 run = keywords.some(kw => content === kw);
+            } else if (item.type_search == 3) {
+                // Partes ordenadas: "fal.atend" → ["fal","atend"] devem aparecer EM ORDEM
+                // na mensagem, cada parte no início de uma palavra (fronteira de palavra)
+                // Exemplo: "fal.atend" reconhece "falar com atendente" e "quero falar com um atendente"
+                run = keywords.some(kw => {
+                    const parts = kw.split('.');
+                    let idx = 0;
+                    return parts.every(part => {
+                        const pos = content.indexOf(part.trim(), idx);
+                        if (pos !== -1 && (pos === 0 || /\s/.test(content.charAt(pos - 1)))) {
+                            idx = pos + part.length;
+                            return true;
+                        }
+                        return false;
+                    });
+                });
+            } else if (item.type_search == 4) {
+                // Prefixo com contexto: keyword presente E há conteúdo adicional após ela
+                // Usado em fluxos de agendamento (ex: "AGENDAR manicure" extrai "manicure")
+                run = keywords.some(kw => {
+                    const pos = content.indexOf(kw);
+                    return pos !== -1 && content.substring(pos).trim().length > kw.length;
+                });
             } else {
                 run = keywords.some(kw => content.includes(kw));
             }
@@ -907,9 +939,30 @@ const WAZIPER = {
             await WAZIPER.auto_send(instance_id, chat_id, chat_id, "chatbot", item, false, msg_info, (result) => {
                 console.log(CYAN + `[chatbot] ${instance_id} → ${userPhone}: status=${result.status}` + RESET);
             });
+
+            // Dispara automaticamente o próximo passo do fluxo (nextaction encadeado)
+            if (nextaction) {
+                await WAZIPER._chatbot_nextaction(instance_id, chat_id, nextaction, msg_info, 0);
+            }
         }
 
         return false;
+    },
+
+    // Dispara o próximo item do chatbot pelo campo "nextaction" (encadeamento de fluxo)
+    _chatbot_nextaction: async function(instance_id, chat_id, nextaction, msg_info, depth) {
+        if (depth > 5) return; // proteção contra loop infinito
+        const items_next = await Common.db_fetch("sp_whatsapp_chatbot", [{ keywords: nextaction }, { instance_id }, { status: 1 }, { run: 1 }]);
+        if (!items_next || items_next.length === 0) return;
+        const next_item = items_next[0];
+        await new Promise(r => setTimeout(r, 5000));
+        await WAZIPER.auto_send(instance_id, chat_id, chat_id, "chatbot", next_item, false, msg_info, (result) => {
+            console.log(CYAN + `[chatbot/next] ${instance_id} → ${chat_id}: step=${depth+1} status=${result.status}` + RESET);
+        });
+        const next_next = next_item.nextaction || '';
+        if (next_next && next_next !== nextaction) {
+            await WAZIPER._chatbot_nextaction(instance_id, chat_id, next_next, msg_info, depth + 1);
+        }
     },
 
     // -----------------------------------------------------------------------
