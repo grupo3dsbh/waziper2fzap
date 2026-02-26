@@ -1,11 +1,12 @@
 const mysql = require('mysql');
-const config = require("./../config.js");
+const config = require("./../config.cjs");
 const moment = require('moment-timezone');
 const db_connect = mysql.createPool(config.database);
 const Common = {
 	db_query: async function(query, row){
 		var res = await new Promise( async (resolve, reject)=>{
 	        db_connect.query( query, (err, res)=>{
+	            if (err) console.error('[DB] db_query error:', err.message, '| query:', query);
 	            return resolve(res, true);
 	        });
 	    });
@@ -14,6 +15,7 @@ const Common = {
 	db_insert: async function(table, data){
 		var res = await new Promise( async (resolve, reject)=>{
 	        db_connect.query( "INSERT INTO "+table+" SET ?", data,  (err, res)=>{
+	            if (err) console.error('[DB] db_insert error:', err.message, '| table:', table);
 	            return resolve(res, true);
 	        });
 	    });
@@ -22,6 +24,7 @@ const Common = {
 	db_update: async function(table, data){
 		var res = await new Promise( async (resolve, reject)=>{
 	        db_connect.query( "UPDATE "+table+" SET ? WHERE ?", data, (err, res)=>{
+	            if (err) console.error('[DB] db_update error:', err.message, '| table:', table);
 	            return resolve(res, true);
 	        });
 	    });
@@ -44,6 +47,7 @@ const Common = {
 		}
 		var res = await new Promise( async (resolve, reject)=> {
 	        db_connect.query(query , data, (err, res)=>{
+	            if (err) console.error('[DB] db_get error:', err.message, '| query:', query);
 	            return resolve(res);
 	        });
 	    });
@@ -66,6 +70,7 @@ const Common = {
 		}
 		var res = await new Promise( async (resolve, reject)=> {
 	        db_connect.query(query , data, (err, res)=>{
+	            if (err) console.error('[DB] db_fetch error:', err.message, '| query:', query);
 	            return resolve(res);
 	        });
 	    });
@@ -88,6 +93,7 @@ const Common = {
 		}
 		var res = await new Promise( async (resolve, reject)=>{
 	        db_connect.query( query, data, (err, res)=>{
+	            if (err) console.error('[DB] db_delete error:', err.message, '| query:', query);
 	            return resolve(res, true);
 	        });
 	    });

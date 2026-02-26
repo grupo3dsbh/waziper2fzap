@@ -6,8 +6,8 @@ import cors from 'cors';
 import spintax from 'spintax';
 import axios from 'axios';
 import { Server } from 'socket.io';
-import config from './../config.js';
-import Common from './common.js';
+import config from './../config.cjs';
+import Common from './common.cjs';
 import cron from 'node-cron';
 
 const app = express();
