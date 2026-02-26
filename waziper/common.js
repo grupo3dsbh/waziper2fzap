@@ -1,9 +1,7 @@
-import mysql from 'mysql';
-import config from './../config.js';
-import moment from 'moment-timezone';
-
+const mysql = require('mysql');
+const config = require("./../config.js");
+const moment = require('moment-timezone');
 const db_connect = mysql.createPool(config.database);
-
 const Common = {
 	db_query: async function(query, row){
 		var res = await new Promise( async (resolve, reject)=>{
@@ -96,25 +94,13 @@ const Common = {
 		return res;
 	},
 	get_phone_number: async function(contact_id, phone_numbers){
-        var res = await new Promise(async (resolve, reject)=>{
-            db_connect.query(`SELECT * FROM sp_whatsapp_phone_numbers WHERE pid = ? AND phone NOT IN(?) LIMIT 5`, [contact_id, phone_numbers], (err, rows)=>{
-                if (err) {
-                    reject(err);
-                } else {
-                    const uniqueNumbers = [];
-                    const uniqueSet = new Set();
-                    for (let row of rows) {
-                        if (!uniqueSet.has(row.phone)) {
-                            uniqueSet.add(row.phone);
-                            uniqueNumbers.push(row);
-                        }
-                    }
-                    resolve(uniqueNumbers);
-                }
-            });
-        });
-        return Common.response(res, true);
-    },
+		var res = await new Promise( async (resolve, reject)=>{
+	        db_connect.query( `SELECT *  FROM sp_whatsapp_phone_numbers WHERE pid = '`+contact_id+`' AND phone NOT IN( ? ) LIMIT 5`, [ phone_numbers ],  (err, res)=>{
+	            return resolve(res);
+	        });
+	    });
+		return Common.response(res, true);
+	},
 	get_instance: async function(instance_id){
 		var res = await new Promise( async (resolve, reject)=>{
 			var data = [{
@@ -147,21 +133,6 @@ const Common = {
 	        });
 	    });
 		return res;
-	},
-	upsert_session: async function(instance_id, team_id, info){
-		return await new Promise((resolve) => {
-			const data = {
-				instance_id: instance_id,
-				team_id: team_id,
-				status: 1,
-				data: JSON.stringify(info)
-			};
-			db_connect.query(
-				'INSERT INTO sp_whatsapp_sessions SET ? ON DUPLICATE KEY UPDATE status=1, data=VALUES(data)',
-				data,
-				(err, res) => resolve(res)
-			);
-		});
 	},
 	db_insert_account: async function(instance_id, team_id, wa_info){
 		var res = await new Promise( async (resolve, reject)=>{
@@ -200,7 +171,6 @@ const Common = {
 				avatar: wa_info.avatar,
 				tmp: JSON.stringify(wa_info),
 				status: 1,
-				can_post: 1,
 				changed: Common.time(),
 			},{
 				id: account_id
@@ -240,6 +210,7 @@ const Common = {
 			}else{
 				return res;
 			}
+
 		}
 		return false;
 	},
@@ -284,7 +255,7 @@ const Common = {
 	    }
 	    return result.toLowerCase();
 	},
-	time: function() {
+	time: function(length) {
 	    return Math.round( new Date().getTime()/1000 );
 	},
 	randomIntFromInterval: function(min, max) {
@@ -321,8 +292,8 @@ const Common = {
 			case 'wid':
 				id = id.split(":");
 				if(id.length == 2){
-					var id1 = id[0];
-					var id2 = id[1];
+					id1 = id[0];
+					id2 = id[1];
 					id2 = id2.split("@");
 					id = id1 + "@" + id2[1];
 				}else{
@@ -404,6 +375,7 @@ const Common = {
 			"ogg": "audio/ogg",
 			"jpeg": "image/jpeg",
 			"pdf": "application/pdf",
+			"ogg": "audio/ogg",
 			"gif": "image/gif",
 			"webp": "image/webp"
 		}
@@ -459,6 +431,5 @@ const Common = {
 		}
 		return post_type;
 	},
-};
-
-export default Common;
+}
+module.exports = Common;

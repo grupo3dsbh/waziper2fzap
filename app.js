@@ -1,4 +1,4 @@
-import WAZIPER from "./waziper/waziper.js";
+const WAZIPER = require("./waziper/waziper.js");
 
 WAZIPER.app.get('/instance', WAZIPER.cors, async (req, res) => {
     var access_token = req.query.access_token;
